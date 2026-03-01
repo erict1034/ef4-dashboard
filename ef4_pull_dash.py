@@ -1,5 +1,4 @@
 import time
-
 import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ from edgar import Company, set_identity
 
 # Important: Set your email here to comply with SEC EDGAR access policies.
 # This is required to use the edgar package for fetching Form 4 filings.
-set_identity("email@email.com")
+set_identity("erict1034@gmail.com")
 
 # Cache settings
 CACHE_TTL_SECONDS = 900
