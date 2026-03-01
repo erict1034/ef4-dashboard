@@ -11,7 +11,7 @@ from edgar import Company, set_identity
 
 # Important: Set your email here to comply with SEC EDGAR access policies.
 # This is required to use the edgar package for fetching Form 4 filings.
-set_identity("email@email.com")
+set_identity("erict1034@gmail.com")
 
 # Cache settings
 CACHE_TTL_SECONDS = 900
@@ -28,7 +28,7 @@ COLORS = {
     "muted": "#ffffff",
     "sales": "#FAB700",
     "acq": "#01F9DC",
-    "price": "#8ecae6",
+    "price": "#2f06f9",
 }
 
 CARD_STYLE = {
@@ -119,7 +119,7 @@ def _resolve_cik_from_ticker(ticker):
     try:
         cik_lookup = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "email@email.com"},
+            headers={"User-Agent": "erict1034@gmail.com"},
             timeout=15,
         ).json()
     except Exception as exc:
@@ -162,10 +162,10 @@ def fetch_form4_dataframe(ticker, filing_limit=DEFAULT_FILING_LIMIT):
     return df.copy(deep=True), False
 
 
-# Function to build a monthly summary of sales (S) and acquisitions (A) from the Form 4 data,
+# Function to build a monthly summary of sales (S) and purchases (P) from the Form 4 data,
 def build_monthly(df, metric_mode="count"):
     if df.empty or "Code" not in df.columns or "Date" not in df.columns:
-        return pd.DataFrame(columns=["S", "A"])
+        return pd.DataFrame(columns=["S", "P"])
 
     working = df[["Code", "Date"]].copy()
     use_shares = metric_mode == "shares" and "Shares" in df.columns
@@ -175,10 +175,10 @@ def build_monthly(df, metric_mode="count"):
         ).fillna(0.0)
     working["Date"] = pd.to_datetime(working["Date"], errors="coerce")
     working = working.dropna(subset=["Date"])
-    working = working[working["Code"].isin(["S", "A"])]
+    working = working[working["Code"].isin(["S", "P"])]
 
     if working.empty:
-        return pd.DataFrame(columns=["S", "A"])
+        return pd.DataFrame(columns=["S", "P"])
 
     working["Month"] = working["Date"].dt.to_period("M").astype(str)
     if use_shares:
@@ -192,10 +192,10 @@ def build_monthly(df, metric_mode="count"):
 
     if "S" not in monthly.columns:
         monthly["S"] = 0.0 if use_shares else 0
-    if "A" not in monthly.columns:
-        monthly["A"] = 0.0 if use_shares else 0
+    if "P" not in monthly.columns:
+        monthly["P"] = 0.0 if use_shares else 0
 
-    return monthly[["S", "A"]]
+    return monthly[["S", "P"]]
 
 
 # Function to fetch monthly closing prices from Yahoo Finance for the
@@ -222,11 +222,13 @@ def fetch_monthly_prices(ticker, monthly):
             auto_adjust=True,
         )
     except Exception as exc:
-        raise DataSourceError(f"Yahoo price lookup failed for {ticker}: {exc}") from exc
+        raise DataSourceError(
+            f"Y!Finance price lookup failed for {ticker}: {exc}"
+        ) from exc
 
     if price_df.empty:
         raise DataSourceError(
-            f"Yahoo returned no price data for {ticker} in range {start_date} to {end_date}."
+            f"Y!Finance returned no price data for {ticker} in range {start_date} to {end_date}."
         )
 
     close_series = price_df["Close"]
@@ -254,12 +256,14 @@ def build_figure(
     metric_mode="count",
     s_color=None,
     a_color=None,
+    price_color=None,
     text_color=None,
     card_bg=None,
 ):
     metric_label = "Shares" if metric_mode == "shares" else "Count"
     s_color = s_color or COLORS["sales"]
     a_color = a_color or COLORS["acq"]
+    price_color = price_color or COLORS["price"]
     text_color = text_color or COLORS["text"]
     card_bg = card_bg or COLORS["card_bg"]
     s_bar_color = hex_to_rgba(s_color, 0.45)
@@ -267,7 +271,7 @@ def build_figure(
     if monthly.empty:
         fig = go.Figure()
         fig.update_layout(
-            title=f"No Form 4 S/A {metric_label.lower()} data found for {ticker}",
+            title=f"No Form 4 S/P {metric_label.lower()} data found for {ticker}",
             xaxis_title="Month",
             yaxis_title=metric_label,
             template="plotly_white",
@@ -275,7 +279,7 @@ def build_figure(
         return fig
 
     monthly_df = monthly.reset_index().melt(
-        id_vars="Month", value_vars=["S", "A"], var_name="Code", value_name="Count"
+        id_vars="Month", value_vars=["S", "P"], var_name="Code", value_name="Count"
     )
 
     fig = px.bar(
@@ -284,8 +288,8 @@ def build_figure(
         y="Count",
         color="Code",
         barmode="group",
-        title=f"Insider Monthly Sales (S) vs Acquisitions (A) {metric_label} - {ticker}",
-        color_discrete_map={"S": s_bar_color, "A": a_bar_color},
+        title=f"Insider Monthly Sales (S) vs Purchases (P) {metric_label} - {ticker}",
+        color_discrete_map={"S": s_bar_color, "P": a_bar_color},
     )
 
     monthly_s = monthly["S"].reset_index(name="SCount")
@@ -302,16 +306,16 @@ def build_figure(
             )
         )
 
-    monthly_a = monthly["A"].reset_index(name="ACount")
-    if len(monthly_a) >= 2:
-        x_idx = np.arange(len(monthly_a))
-        a_coeffs = np.polyfit(x_idx, monthly_a["ACount"], 1)
+    monthly_p = monthly["P"].reset_index(name="PCount")
+    if len(monthly_p) >= 2:
+        x_idx = np.arange(len(monthly_p))
+        a_coeffs = np.polyfit(x_idx, monthly_p["PCount"], 1)
         fig.add_trace(
             go.Scatter(
-                x=monthly_a["Month"],
+                x=monthly_p["Month"],
                 y=np.polyval(a_coeffs, x_idx),
                 mode="lines",
-                name=f"Trend Acquisitions ({metric_label})",
+                name=f"Trend Purchases ({metric_label})",
                 line=dict(color=a_color, width=3, dash="dash"),
             )
         )
@@ -323,7 +327,7 @@ def build_figure(
                 y=monthly_price_df["YahooClose"],
                 mode="lines",
                 name=f"{ticker} Month Closing Price",
-                line=dict(color=COLORS["price"], width=3),
+                line=dict(color=price_color, width=3),
                 yaxis="y2",
             )
         )
@@ -353,11 +357,11 @@ def classify_error_message(exc):
     text = str(exc)
     lowered = text.lower()
     if "429" in text or "rate" in lowered or "too many" in lowered:
-        return "Rate limited by SEC or Yahoo. Wait a minute and retry."
+        return "Rate limited by SEC or Y!Finance. Wait a minute and retry."
     if "no form 4 filings" in lowered:
         return text
     if "no price data" in lowered or "possibly delisted" in lowered:
-        return "No Yahoo price data found for this ticker/date range."
+        return "No Y!Finance price data found for this ticker/date range."
     if "not found" in lowered or "invalid" in lowered:
         return "Ticker not recognized. Check symbol and retry."
     return text
@@ -371,6 +375,7 @@ def load_ticker_dashboard(
     metric_mode="count",
     s_color=None,
     a_color=None,
+    price_color=None,
     text_color=None,
     card_bg=None,
 ):
@@ -378,7 +383,7 @@ def load_ticker_dashboard(
     monthly = build_monthly(df, metric_mode=metric_mode)
     if monthly.empty:
         raise DataSourceError(
-            f"No S/A transactions found in Form 4 filings for {ticker}."
+            f"No S/P transactions found in Form 4 filings for {ticker}."
         )
 
     monthly_price_df, prices_from_cache = fetch_monthly_prices(ticker, monthly)
@@ -390,15 +395,16 @@ def load_ticker_dashboard(
         metric_mode=metric_mode,
         s_color=s_color,
         a_color=a_color,
+        price_color=price_color,
         text_color=text_color,
         card_bg=card_bg,
     )
     if metric_mode == "shares":
         total_s = f"{int(round(monthly['S'].sum())):,}" if not monthly.empty else "0"
-        total_a = f"{int(round(monthly['A'].sum())):,}" if not monthly.empty else "0"
+        total_a = f"{int(round(monthly['P'].sum())):,}" if not monthly.empty else "0"
     else:
         total_s = f"{int(monthly['S'].sum()):,}" if not monthly.empty else "0"
-        total_a = f"{int(monthly['A'].sum()):,}" if not monthly.empty else "0"
+        total_a = f"{int(monthly['P'].sum()):,}" if not monthly.empty else "0"
     latest_close = (
         f"${monthly_price_df['YahooClose'].iloc[-1]:,.2f}"
         if not monthly_price_df.empty
@@ -425,8 +431,8 @@ def empty_figure(title, text_color=None, card_bg=None):
 
 
 # Initialize the Dash app with Bootstrap styling and define the layout, which includes input
-# fields for ticker and filing limit, metric mode selection, summary cards for total sales/acquisitions
-# and latest close price, and a graph area for the monthly S/A chart.
+# fields for ticker and filing limit, metric mode selection, summary cards for total sales/purchases
+# and latest close price, and a graph area for the monthly S/P chart.
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
 
 # Define the app layout with input fields, summary cards, and graph area
@@ -438,11 +444,11 @@ app.layout = dbc.Container(
                     dbc.CardBody(
                         [
                             html.H5(
-                                "Recent Counts of Insider Stock Sales and Acquisitions from SEC Form 4 Filings",
+                                "Recent Counts of Insider Stock Sales and Purchases from SEC Form 4 Filings",
                                 className="card-title mb-0",
                             ),
                             html.P(
-                                "Enter a ticker to pull live Form 4 (EDGAR) and price (Yahoo) data",
+                                "Enter a ticker to pull live Form 4 (EDGAR) and price (Y!Finance) data",
                                 id="subtitle-text",
                                 className="mb-0",
                                 style={"color": COLORS["muted"]},
@@ -464,7 +470,7 @@ app.layout = dbc.Container(
                         id="ticker-input",
                         type="text",
                         value="",
-                        placeholder="Enter ticker (e.g., AAPL)",
+                        placeholder="Enter ticker (e.g., MSFT)",
                     ),
                     md=4,
                 ),
@@ -535,7 +541,7 @@ app.layout = dbc.Container(
                 dbc.Col(
                     dbc.Card(
                         dbc.CardBody(
-                            [html.H6("Total Acquisitions"), html.H4("-", id="total-a")]
+                            [html.H6("Total Purchases"), html.H4("-", id="total-a")]
                         ),
                         id="acq-card",
                         className="shadow-sm",
@@ -592,11 +598,23 @@ app.layout = dbc.Container(
                 ),
                 dbc.Col(
                     [
-                        html.Label("A Color", className="mb-1"),
+                        html.Label("P Color", className="mb-1"),
                         dbc.Input(
-                            id="a-color",
+                            id="p-color",
                             type="color",
                             value=COLORS["acq"],
+                            style={"width": "3rem", "height": "1.8rem", "padding": "0"},
+                        ),
+                    ],
+                    md=2,
+                ),
+                dbc.Col(
+                    [
+                        html.Label("Stock Price Color", className="mb-1"),
+                        dbc.Input(
+                            id="price-color",
+                            type="color",
+                            value=COLORS["price"],
                             style={"width": "3rem", "height": "1.8rem", "padding": "0"},
                         ),
                     ],
@@ -624,7 +642,7 @@ app.layout = dbc.Container(
                             style={"width": "3rem", "height": "1.8rem", "padding": "0"},
                         ),
                     ],
-                    md=3,
+                    md=2,
                 ),
                 dbc.Col(
                     [
@@ -636,7 +654,7 @@ app.layout = dbc.Container(
                             style={"width": "3rem", "height": "1.8rem", "padding": "0"},
                         ),
                     ],
-                    md=3,
+                    md=2,
                 ),
             ],
             className="mt-3 mb-3 align-items-end",
@@ -660,7 +678,8 @@ app.layout = dbc.Container(
     Input("pull-button", "n_clicks"),
     Input("metric-mode", "value"),
     Input("s-color", "value"),
-    Input("a-color", "value"),
+    Input("p-color", "value"),
+    Input("price-color", "value"),
     Input("text-color", "value"),
     Input("card-bg-color", "value"),
     State("ticker-input", "value"),
@@ -673,7 +692,7 @@ app.layout = dbc.Container(
                 [
                     dbc.Spinner(size="sm", color="primary", type="border"),
                     html.Span(
-                        " Updating graph... pulling data and building chart.",
+                        " Updating dashboard... pulling data and building chart. This is a Government data source, so this could take a few minutes. Be patient ",
                         className="ms-2",
                     ),
                 ],
@@ -690,6 +709,7 @@ def pull_and_render(
     metric_mode,
     s_color,
     a_color,
+    price_color,
     text_color,
     card_bg,
     ticker_value,
@@ -703,13 +723,22 @@ def pull_and_render(
     card_bg = card_bg or COLORS["card_bg"]
 
     # If only style inputs changed, update chart appearance without re-pulling data.
-    if ctx.triggered_id in {"text-color", "card-bg-color"} and current_figure:
+    if (
+        ctx.triggered_id in {"text-color", "card-bg-color", "price-color"}
+        and current_figure
+    ):
         fig = go.Figure(current_figure)
-        fig.update_layout(
-            paper_bgcolor=card_bg,
-            plot_bgcolor=card_bg,
-            font=dict(color=text_color),
-        )
+        if ctx.triggered_id in {"text-color", "card-bg-color"}:
+            fig.update_layout(
+                paper_bgcolor=card_bg,
+                plot_bgcolor=card_bg,
+                font=dict(color=text_color),
+            )
+        if ctx.triggered_id == "price-color":
+            fig.update_traces(
+                line=dict(color=price_color or COLORS["price"]),
+                selector=dict(yaxis="y2"),
+            )
         return fig, no_update, no_update, no_update, no_update, no_update
 
     if not ticker:
@@ -730,6 +759,7 @@ def pull_and_render(
             metric_mode=metric_mode,
             s_color=s_color,
             a_color=a_color,
+            price_color=price_color,
             text_color=text_color,
             card_bg=card_bg,
         )
@@ -739,7 +769,7 @@ def pull_and_render(
         if f_cached:
             cache_parts.append("EDGAR cache")
         if p_cached:
-            cache_parts.append("Yahoo cache")
+            cache_parts.append("Y!Finance cache")
         cache_suffix = f" ({', '.join(cache_parts)})" if cache_parts else ""
 
         return (
