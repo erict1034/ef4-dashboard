@@ -1,3 +1,6 @@
+
+<H1>ef4_dashboard</H1>
+This is a Plotly Dashboard that pulls Edgar Form 4 data and Yahoo!Finance stock price data for a ticker provided by the user.
 <H3>Running the application.</H3>
 python f4_pull_dash.py
 
