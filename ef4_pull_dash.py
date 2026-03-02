@@ -11,7 +11,7 @@ from edgar import Company, set_identity
 
 # Important: Set your email here to comply with SEC EDGAR access policies.
 # This is required to use the edgar package for fetching Form 4 filings.
-set_identity("erict1034@gmail.com")
+set_identity("email@email.com")
 
 # Cache settings
 CACHE_TTL_SECONDS = 900
@@ -119,7 +119,7 @@ def _resolve_cik_from_ticker(ticker):
     try:
         cik_lookup = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "erict1034@gmail.com"},
+            headers={"User-Agent": "email@email.com"},
             timeout=15,
         ).json()
     except Exception as exc:
