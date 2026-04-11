@@ -5,19 +5,21 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-import yfinance as yf
 from dash import Dash, Input, Output, State, ctx, dcc, html, no_update
 from edgar import Company, set_identity
 
 # Important: Set your email here to comply with SEC EDGAR access policies.
 # This is required to use the edgar package for fetching Form 4 filings.
-set_identity("email@email.com")
+SEC_CONTACT_EMAIL = "erict1034@gmail.com"
+set_identity(SEC_CONTACT_EMAIL)
 
 # Cache settings
 CACHE_TTL_SECONDS = 900
 DEFAULT_FILING_LIMIT = 200
 FORM4_CACHE = {}
 PRICE_CACHE = {}
+ALPHAVANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+ALPHAVANTAGE_API_KEY = "Y5N7XAYS4Z8FI0G4"
 
 # Visual theme colors for chart + layout
 COLORS = {
@@ -116,18 +118,52 @@ def _resolve_cik_from_ticker(ticker):
     if not ticker:
         raise DataSourceError("Ticker is empty.")
 
+    headers = {
+        "User-Agent": f"ef4-dashboard ({SEC_CONTACT_EMAIL})",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+    }
+
     try:
-        cik_lookup = requests.get(
+        response = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "email@email.com"},
+            headers=headers,
             timeout=15,
-        ).json()
+        )
+        response.raise_for_status()
+        text = (response.text or "").strip()
+        if not text:
+            raise DataSourceError(
+                "SEC company_tickers.json returned an empty response body."
+            )
+        cik_lookup = response.json()
     except Exception as exc:
+        try:
+            fallback = requests.get(
+                "https://www.sec.gov/include/ticker.txt",
+                headers=headers,
+                timeout=15,
+            )
+            fallback.raise_for_status()
+            for line in fallback.text.splitlines():
+                parts = line.strip().split("\t")
+                if len(parts) != 2:
+                    continue
+                if parts[0].strip().upper() == ticker:
+                    return str(parts[1].strip()).zfill(10)
+        except Exception:
+            pass
         raise DataSourceError(f"Failed to download SEC CIK lookup: {exc}") from exc
 
-    for company in cik_lookup.values():
+    companies = cik_lookup.values() if isinstance(cik_lookup, dict) else cik_lookup
+    for company in companies:
+        if not isinstance(company, dict):
+            continue
         if str(company.get("ticker", "")).upper() == ticker:
-            return str(company["cik_str"]).zfill(10)
+            cik = company.get("cik_str")
+            if cik is None:
+                continue
+            return str(cik).zfill(10)
 
     raise DataSourceError(f"Ticker not found in SEC company_tickers.json: {ticker}.")
 
@@ -198,11 +234,63 @@ def build_monthly(df, metric_mode="count"):
     return monthly[["S", "P"]]
 
 
-# Function to fetch monthly closing prices from Yahoo Finance for the
+# Function to fetch monthly prices from Alpha Vantage's free endpoint.
+def _fetch_alphavantage_monthly(ticker, api_key):
+    params = {
+        "function": "TIME_SERIES_MONTHLY",
+        "symbol": ticker,
+        "apikey": api_key,
+    }
+    try:
+        response = requests.get(ALPHAVANTAGE_BASE_URL, params=params, timeout=20)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        raise DataSourceError(
+            f"Alpha Vantage price lookup failed for {ticker}: {exc}"
+        ) from exc
+
+    if "Error Message" in payload:
+        raise DataSourceError(payload["Error Message"])
+    if "Note" in payload:
+        raise DataSourceError(payload["Note"])
+    if "Information" in payload:
+        raise DataSourceError(payload["Information"])
+
+    series = payload.get("Monthly Time Series")
+    if not series:
+        raise DataSourceError(
+            f"No Alpha Vantage monthly time series returned for {ticker}."
+        )
+
+    price_df = pd.DataFrame.from_dict(series, orient="index")
+    if "4. close" not in price_df.columns:
+        raise DataSourceError(
+            f"Alpha Vantage response missing close price field for {ticker}."
+        )
+    close_col = "4. close"
+
+    return (
+        price_df[[close_col]]
+        .rename(columns={close_col: "AlphaVantageClose"})
+        .assign(Date=lambda d: pd.to_datetime(d.index, errors="coerce"))
+        .dropna(subset=["Date"])
+        .assign(
+            AlphaVantageClose=lambda d: pd.to_numeric(
+                d["AlphaVantageClose"], errors="coerce"
+            )
+        )
+        .dropna(subset=["AlphaVantageClose"])
+        .set_index("Date")
+        .sort_index()
+    )
+
+
+# Function to fetch monthly closing prices from Alpha Vantage for the
 # date range covered by the Form 4 data, with caching support
 def fetch_monthly_prices(ticker, monthly):
     if monthly.empty:
-        return pd.DataFrame(columns=["Month", "YahooClose"]), False
+        return pd.DataFrame(columns=["Month", "AlphaVantageClose"]), False
 
     month_idx = pd.to_datetime(monthly.index, format="%Y-%m")
     start_date = month_idx.min().strftime("%Y-%m-%d")
@@ -213,31 +301,21 @@ def fetch_monthly_prices(ticker, monthly):
     if cached is not None:
         return cached.copy(deep=True), True
 
-    try:
-        price_df = yf.download(
-            ticker,
-            start=start_date,
-            end=end_date,
-            progress=False,
-            auto_adjust=True,
-        )
-    except Exception as exc:
+    api_key = (ALPHAVANTAGE_API_KEY or "").strip()
+    if not api_key:
         raise DataSourceError(
-            f"Y!Finance price lookup failed for {ticker}: {exc}"
-        ) from exc
+            "Missing Alpha Vantage API key in code. Set ALPHAVANTAGE_API_KEY and retry."
+        )
 
+    price_df = _fetch_alphavantage_monthly(ticker, api_key)
+    price_df = price_df.loc[start_date:end_date]
     if price_df.empty:
         raise DataSourceError(
-            f"Y!Finance returned no price data for {ticker} in range {start_date} to {end_date}."
+            f"Alpha Vantage returned no price data for {ticker} in range {start_date} to {end_date}."
         )
 
-    close_series = price_df["Close"]
-    if isinstance(close_series, pd.DataFrame):
-        close_series = close_series.iloc[:, 0]
-
-    monthly_close = close_series.resample("ME").last().dropna()
     monthly_price_df = (
-        monthly_close.to_frame(name="YahooClose")
+        price_df[["AlphaVantageClose"]]
         .assign(Month=lambda d: d.index.to_period("M").astype(str))
         .reset_index(drop=True)
     )
@@ -324,7 +402,7 @@ def build_figure(
         fig.add_trace(
             go.Scatter(
                 x=monthly_price_df["Month"],
-                y=monthly_price_df["YahooClose"],
+                y=monthly_price_df["AlphaVantageClose"],
                 mode="lines",
                 name=f"{ticker} Month Closing Price",
                 line=dict(color=price_color, width=3),
@@ -356,14 +434,33 @@ def build_figure(
 def classify_error_message(exc):
     text = str(exc)
     lowered = text.lower()
+    is_edgar_error = any(
+        key in lowered for key in ["sec", "edgar", "form 4", "cik", "company_tickers"]
+    )
+    is_alpha_error = "alpha vantage" in lowered or "alphavantage" in lowered
+
     if "429" in text or "rate" in lowered or "too many" in lowered:
-        return "Rate limited by SEC or Y!Finance. Wait a minute and retry."
+        if is_edgar_error:
+            return "EDGAR rate limit hit. Wait a minute and retry."
+        if is_alpha_error:
+            return "Alpha Vantage rate limit hit. Wait a minute and retry."
+        return "Rate limit hit. Wait a minute and retry."
     if "no form 4 filings" in lowered:
-        return text
+        return f"EDGAR: {text}"
+    if "missing alpha vantage api key" in lowered:
+        return "Alpha Vantage: Missing ALPHAVANTAGE_API_KEY in code. Add your key and retry."
     if "no price data" in lowered or "possibly delisted" in lowered:
-        return "No Y!Finance price data found for this ticker/date range."
+        return "Alpha Vantage: No price data found for this ticker/date range."
     if "not found" in lowered or "invalid" in lowered:
+        if is_edgar_error:
+            return "EDGAR: Ticker not recognized. Check symbol and retry."
+        if is_alpha_error:
+            return "Alpha Vantage: Ticker not recognized. Check symbol and retry."
         return "Ticker not recognized. Check symbol and retry."
+    if is_edgar_error:
+        return f"EDGAR: {text}"
+    if is_alpha_error:
+        return f"Alpha Vantage: {text}"
     return text
 
 
@@ -406,7 +503,7 @@ def load_ticker_dashboard(
         total_s = f"{int(monthly['S'].sum()):,}" if not monthly.empty else "0"
         total_a = f"{int(monthly['P'].sum()):,}" if not monthly.empty else "0"
     latest_close = (
-        f"${monthly_price_df['YahooClose'].iloc[-1]:,.2f}"
+        f"${monthly_price_df['AlphaVantageClose'].iloc[-1]:,.2f}"
         if not monthly_price_df.empty
         else "N/A"
     )
@@ -448,7 +545,7 @@ app.layout = dbc.Container(
                                 className="card-title mb-0",
                             ),
                             html.P(
-                                "Enter a ticker to pull live Form 4 (EDGAR) and price (Y!Finance) data",
+                                "Enter a ticker to pull live Form 4 (EDGAR) and price (Alpha Vantage) data",
                                 id="subtitle-text",
                                 className="mb-0",
                                 style={"color": COLORS["muted"]},
@@ -769,7 +866,7 @@ def pull_and_render(
         if f_cached:
             cache_parts.append("EDGAR cache")
         if p_cached:
-            cache_parts.append("Y!Finance cache")
+            cache_parts.append("Alpha Vantage cache")
         cache_suffix = f" ({', '.join(cache_parts)})" if cache_parts else ""
 
         return (
@@ -845,5 +942,7 @@ def toggle_pull_button(limit_value):
 
 
 # Run the Dash app in debug mode when this script is executed directly
+server = app.server
+
 if __name__ == "__main__":
     app.run(debug=True)
